@@ -23,7 +23,7 @@ class LinfPGDAttack(object):
         self.epsilon = epsilon
         self.k = k
         self.a = a
-        self.loss_fn = nn.MSELoss().to(device)
+        self.loss_fn = nn.MSELoss()
         self.device = device
 
         # Feature-level attack? Which layer?
@@ -83,11 +83,10 @@ class LinfPGDAttack(object):
         for i in range(self.k):
             X.requires_grad = True
             output = attgan.G(X, X_att)
-
             attgan.G.zero_grad()
             # Minus in the loss means "towards" and plus means "away from"
             loss = self.loss_fn(output, y)
-            loss.backward()
+            loss.backward(retain_graph=True)
             grad = X.grad
 
             X_adv = X + self.a * grad.sign()

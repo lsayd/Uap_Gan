@@ -9,161 +9,160 @@ from torch.autograd import Variable
 from torchvision.utils import save_image
 import torch
 import torch.nn.functional as F
+import torch.utils.data as data
+import torchvision.utils as vutils
 import numpy as np
+
+
+import argparse
+import json
 import os
-import time
-import datetime
-import attacks
-
-from PIL import ImageFilter
-from PIL import Image
-from torchvision import transforms
-
-import sys
+from os.path import join
+from data import check_attribute_conflict
+from attgan import AttGAN
+from helpers import Progressbar
 from utils import find_model
 
+import sys
+
 sys.path.append(r'D:\lkq\UniversalPert_Gan\stargan')
-from data_loader import CelebA,get_loader
-from universal_pert import universal
-from attgan import AttGAN
+import attacks
 
 
-def create_labels( c_org, c_dim=5, dataset='CelebA', selected_attrs=None):
-    """Generate target domain labels for debugging and testing."""
-    # Get hair color indices.
-    if dataset == 'CelebA':
-        hair_color_indices = []
-        for i, attr_name in enumerate(selected_attrs):
-            if attr_name in ['Black_Hair', 'Blond_Hair', 'Brown_Hair', 'Gray_Hair']:
-                hair_color_indices.append(i)
-
-    c_trg_list = []
-    for i in range(c_dim):
-        if dataset == 'CelebA':
-            c_trg = c_org.clone()
-            if i in hair_color_indices:  # Set one hair color to 1 and the rest to 0.
-                c_trg[:, i] = 1
-                for j in hair_color_indices:
-                    if j != i:
-                        c_trg[:, j] = 0
-            else:
-                # Reverse attribute value.
-                c_trg[:, i] = (c_trg[:, i] == 0)
+def parse(args=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--experiment_name', dest='experiment_name', default='256_shortcut1_inject0_none_hq')
+    parser.add_argument('--test_int', dest='test_int', type=float, default=1.0)
+    parser.add_argument('--num_test', dest='num_test', type=int)
+    parser.add_argument('--load_epoch', dest='load_epoch', type=str, default='latest')
+    parser.add_argument('--custom_img', action='store_true')
+    parser.add_argument('--custom_data', type=str, default='D:\lkq\Image')
+    parser.add_argument('--custom_attr', type=str, default='D:/lkq/UniversalPert_Gan/AttGAN/data/list_attr_custom.txt')
+    parser.add_argument('--gpu', action='store_true')
+    parser.add_argument('--multi_gpu', action='store_true')
+    parser.add_argument('--selected_attrs', '--list', nargs='+', help='selected attributes for the CelebA dataset',
+                        default=['Black_Hair', 'Blond_Hair', 'Brown_Hair', 'Male', 'Young'])
+    parser.add_argument('--c_dim', type=int, default=5, help='dimension of domain labels (1st dataset)')
+    return parser.parse_args(args)
 
 
-        c_trg_list.append(c_trg)
-    return c_trg_list
+args_ = parse()
+print(args_)
 
-class SolverUniversal(object):
-    def __init__(self,celeba_loader,args):
-        self.celeba_loader = celeba_loader
-        self.args=args
-        self.device = torch.device(
-            'cuda' if torch.cuda.is_available() else 'cpu')
-        self.G=None
+with open(r'D:\lkq\UniversalPert_Gan\AttGAN\output\256_shortcut1_inject0_none_hq\setting.txt', 'r') as f:
+    args = json.load(f, object_hook=lambda d: argparse.Namespace(**d))
 
-    def restore_model(self):
-        """Restore the trained generator and discriminator."""
-        attgan = AttGAN(self.args)
-        attgan.load(find_model(join('output', self.args.experiment_name, 'checkpoint'), self.args.load_epoch))
-        self.G=attgan.G
-        print(111111111111111)
+args.test_int = args_.test_int
+args.num_test = args_.num_test
+args.gpu = args_.gpu
+args.load_epoch = args_.load_epoch
+args.multi_gpu = args_.multi_gpu
+args.custom_img = args_.custom_img
+args.custom_data = args_.custom_data
+args.custom_attr = args_.custom_attr
+args.n_attrs = len(args.attrs)
+args.betas = (args.beta1, args.beta2)
 
+print(args)
 
-    def get_universal_perturbation(self):
-        self.restore_model()
-        file_perturbation = os.path.join('data', 'universal.npy')
+if args.custom_img:
+    # output_path = join('output', args.experiment_name, 'custom_testing')
+    output_path='D:/lkq/UniversalPert_Gan/AttGAN/output/256_shortcut1_inject0_none_hq/custom_testing'
+    from data import Custom
+    test_dataset = Custom(args.custom_data, args.custom_attr, args.img_size, args.attrs)
+else:
+    output_path = join('output', args.experiment_name, 'sample_testing')
+    if args.data == 'CelebA':
+        from data import CelebA
 
-        # Set data loader.
-        if self.dataset == 'CelebA':
-            data_loader = self.celeba_loader
+        test_dataset = CelebA(args.data_path, args.attr_path, args.img_size, 'test', args.attrs)
 
+    if args.data == 'CelebA-HQ':
+        from data import CelebA_HQ
 
-        model_G = self.G
-        universal_pert = universal(model_G=model_G, device=self.device)
+        test_dataset = CelebA_HQ(args.data_path, args.attr_path, args.image_list_path, args.img_size, 'test',
+                                 args.attrs)
 
-        v = universal_pert.universal_perturbation(data_loader, self.selected_attrs)
+os.makedirs(output_path, exist_ok=True)
+test_dataloader = data.DataLoader(
+    test_dataset, batch_size=1, num_workers=args.num_workers,
+    shuffle=False, drop_last=False
+)
+if args.num_test is None:
+    print('Testing images:', len(test_dataset))
+else:
+    print('Testing images:', min(len(test_dataset), args.num_test))
 
-        np.save(os.path.join(file_perturbation), v)
-        print("saved successfully")
+attgan = AttGAN(args)
+attgan.load(find_model(join('D:/lkq/UniversalPert_Gan/AttGAN/output', args.experiment_name, 'checkpoint'), 199))
+# attgan.load('D:/lkq/UniversalPert_Gan/AttGAN/output/256_shortcut1_inject0_none_hq/checkpoint')
+progressbar = Progressbar()
 
-    def test_universal_OnImages(self):
+attgan.eval()
 
-        print('>> Testing the universal perturbation on  images')
-        self.restore_model()
-        # Set data loader.
-        data_loader = self.celeba_loader
+def proj_lp(v, xi, p):
 
-        # Initialize Metrics
-        l1_error, l2_error, min_dist, l0_error = 0.0, 0.0, 0.0, 0.0
-        n_dist, n_samples = 0, 0
+    # Project on the lp ball centered at 0 and of radius xi
 
-        for i, (x_real, c_org) in enumerate(data_loader):
+    # SUPPORTS only p = 2 and p = Inf for now
+    if p == 2:
+        v = v * min(1, xi/np.linalg.norm(v.flatten(1)))
+        # v = v / np.linalg.norm(v.flatten(1)) * xi
+    elif p == np.inf:
+        v=v.cpu()
+        v = np.sign(v) * np.minimum(abs(v), xi)
+    else:
+         raise ValueError('Values of p different from 2 and Inf are currently not supported...')
 
-            # Prepare input images and target domain labels.
-            x_real = x_real.to(self.device)
-            x_arr = np.array(x_real.cpu())
-            print(x_arr)
-            c_trg_list = create_labels(
-                c_org, 5 , selected_attrs=self.args.selected_attrs)
+    return v
 
-            # Translated images.
-            x_fake_list = [x_real]
+def universal_perturbation(test_dataloader,delta=0.1,xi=10,p=np.inf):
+    v=np.load(r'D:\lkq\disrupting-deepfakes-master\stargan\data\universal.npy')
+    v=torch.from_numpy(v)
+    itr=0
+    for idx, (img_a, att_a) in enumerate(test_dataloader):
+        if args.num_test is not None and idx == args.num_test:
+            break
 
-            for idx, c_trg in enumerate(c_trg_list):
-                print('image', i, 'class', idx)
-                with torch.no_grad():
-                    x_real_mod = x_real
-                    # x_real_mod = self.blur_tensor(x_real_mod) # use blur
-                    gen_noattack, gen_noattack_feats = self.G(
-                        x_real_mod, c_trg)
+        img_a = img_a.cuda() if args.gpu else img_a
+        att_a = att_a.cuda() if args.gpu else att_a
+        att_a = att_a.type(torch.float)
 
-                # Attacks
-                #    x_adv, perturb = universal.perturb(
-                #        x_real, self.D.forward(), self.grad_fs(),c_trg)
-                #
-                #    x_adv = x_real + perturb
-                file_perturbation = os.path.join('data', 'universal.npy')
-                v = np.load(file_perturbation)
-                v = torch.tensor(v)
-                # x_arr=np.array(x_real.cpu())
-                # print(x_arr)
-                x_adv = x_real + v.cuda()
-                # print(x_adv)
-                # x_adv=Image.fromarray(x_adv)
-                # x_adv=x_adv.cuda()
-                with torch.no_grad():
-                    gen, _ = self.G(x_adv, c_trg)
+        att_b_list = [att_a]
+        for i in range(args.n_attrs):
+            tmp = att_a.clone()
+            tmp[:, i] = 1 - tmp[:, i]
+            tmp = check_attribute_conflict(tmp, args.attrs[i], args.attrs)
+            att_b_list.append(tmp)
 
-                    # Add to lists
-                    # x_fake_list.append(blurred_image)
-                    x_fake_list.append(x_adv)
-                    # x_fake_list.append(perturb)
-                    x_fake_list.append(gen)
+        for i, att_b in enumerate(att_b_list):
+            att_b_ = (att_b * 2 - 1) * args.thres_int
+            if i > 0:
+                att_b_[..., i - 1] = att_b_[..., i - 1] * args.test_int / args.thres_int
+            output=attgan.G(img_a,att_b_)
 
-                    l1_error += F.l1_loss(gen, gen_noattack)
-                    l2_error += F.mse_loss(gen, gen_noattack)
-                    l0_error += (gen - gen_noattack).norm(0)
-                    min_dist += (gen - gen_noattack).norm(float('-inf'))
-                    if F.mse_loss(gen, gen_noattack) > 0.05:
-                        n_dist += 1
-                    n_samples += 1
+            #PGD
+            pgd_attack=attacks.LinfPGDAttack( model=attgan )
+            a_adv,dr=pgd_attack.universal_perturb(img_a,att_b_,output,attgan)
 
-            # Save the translated images.
-            x_concat = torch.cat(x_fake_list, dim=3)
-            save_dir = r"\D:\lkq\UniversalPert_Gan\AttGAN\results\universal_starGan"
-            result_path = os.path.join(
-                save_dir, '{}-images.jpg'.format(i + 1))
-            save_image(self.denorm(x_concat.data.cpu()),
-                       result_path, nrow=1, padding=0)
-            if i == 49:  # stop after this many images
-                break
+            # Make sure it converged...
+            v = v.cpu()
+            dr = dr.cpu()
+            v = v + dr
 
-        # Print metrics
-        print('{} images. L1 error: {}. L2 error: {}. prop_dist: {}. L0 error: {}. L_-inf error: {}.'.format(n_samples,
-                                                                                                             l1_error / n_samples,
-                                                                                                             l2_error / n_samples,
-                                                                                                             float(
-                                                                                                                 n_dist) / n_samples,
-                                                                                                             l0_error / n_samples,
-                                                                                                             min_dist / n_samples))
+            # Project on l_p ball
+            v = proj_lp(v, xi, p)
+            itr=itr+1;
+            print(itr);
+    return v
+
+def get_universal_perturbation():
+
+    file_perturbation = os.path.join('data', 'universal.npy')
+
+    v = universal_perturbation(test_dataloader )
+
+    np.save(r'D:\lkq\disrupting-deepfakes-master\stargan\data\universal1.npy', v)
+    print("saved successfully")
+
+get_universal_perturbation()
