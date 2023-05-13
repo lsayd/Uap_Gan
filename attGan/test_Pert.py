@@ -153,7 +153,7 @@ for idx, (img_a, att_a) in enumerate(test_dataloader):
     save_image(denorm(x_concat.data.cpu()),
                result_path, nrow=1, padding=0)
     itr+=1
-    print(itr)
+    print(itr)# testGit
     if i == 49:     # stop after this many images
         break
 
